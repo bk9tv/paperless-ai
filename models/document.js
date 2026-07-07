@@ -11,8 +11,8 @@ if (!fs.existsSync(dataDir)) {
 }
 
 // Initialize database with WAL mode for better performance
-const db = new Database(path.join(dataDir, 'documents.db'), { 
-  //verbose: console.log 
+const db = new Database(path.join(dataDir, 'documents.db'), {
+  //verbose: console.log
 });
 db.pragma('journal_mode = WAL');
 
@@ -64,6 +64,20 @@ const createOriginalDocuments = db.prepare(`
 `);
 createOriginalDocuments.run();
 
+const createFailedDocuments = db.prepare(`
+  CREATE TABLE IF NOT EXISTS failed_documents (
+    id INTEGER PRIMARY KEY,
+    document_id INTEGER UNIQUE,
+    title TEXT,
+    last_error TEXT,
+    last_payload TEXT,
+    attempts INTEGER DEFAULT 1,
+    failed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_failed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+createFailedDocuments.run();
+
 const userTable = db.prepare(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
@@ -77,7 +91,7 @@ userTable.run();
 
 // Prepare statements for better performance
 const insertDocument = db.prepare(`
-  INSERT INTO processed_documents (document_id, title) 
+  INSERT INTO processed_documents (document_id, title)
   VALUES (?, ?)
   ON CONFLICT(document_id) DO UPDATE SET
     last_updated = CURRENT_TIMESTAMP
@@ -103,6 +117,25 @@ const insertHistory = db.prepare(`
   VALUES (?, ?, ?, ?)
 `);
 
+const upsertFailedDocument = db.prepare(`
+  INSERT INTO failed_documents (document_id, title, last_error, last_payload)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT(document_id) DO UPDATE SET
+    title = excluded.title,
+    last_error = excluded.last_error,
+    last_payload = excluded.last_payload,
+    attempts = attempts + 1,
+    last_failed_at = CURRENT_TIMESTAMP
+`);
+
+const findFailedDocument = db.prepare(
+  'SELECT * FROM failed_documents WHERE document_id = ?'
+);
+
+const deleteFailedDocument = db.prepare(
+  'DELETE FROM failed_documents WHERE document_id = ?'
+);
+
 const insertUser = db.prepare(`
   INSERT INTO users (username, password)
   VALUES (?, ?)
@@ -114,7 +147,7 @@ const getHistoryDocumentsCount = db.prepare(`
 `);
 
 const getPaginatedHistoryDocuments = db.prepare(`
-  SELECT * FROM history_documents 
+  SELECT * FROM history_documents
   ORDER BY created_at DESC
   LIMIT ? OFFSET ?
 `);
@@ -145,7 +178,7 @@ const clearProcessingStatus = db.prepare(`
 `);
 
 const getActiveProcessing = db.prepare(`
-  SELECT * FROM processing_status 
+  SELECT * FROM processing_status
   WHERE start_time >= datetime('now', '-30 seconds')
   ORDER BY start_time DESC LIMIT 1
 `);
@@ -217,6 +250,46 @@ module.exports = {
       console.error('[ERROR] checking document:', error);
       // Im Zweifelsfall true zurückgeben, um doppelte Verarbeitung zu vermeiden
       return true;
+    }
+  },
+
+  async isDocumentPermanentlyFailed(documentId, maxAttempts = 3) {
+    try {
+      const row = findFailedDocument.get(documentId);
+      return !!row && row.attempts >= maxAttempts;
+    } catch (error) {
+      console.error('[ERROR] checking failed document:', error);
+      return false;
+    }
+  },
+
+  async addFailedDocument(documentId, title, errorMessage, payload) {
+    try {
+      const payloadString = payload ? JSON.stringify(payload) : null;
+      const result = upsertFailedDocument.run(
+        documentId,
+        title,
+        errorMessage,
+        payloadString
+      );
+      if (result.changes > 0) {
+        console.log(`[DEBUG] Document ${documentId} recorded in failed_documents`);
+        return true;
+      }
+      return false;
+    } catch (error) {
+      console.error('[ERROR] adding failed document:', error);
+      return false;
+    }
+  },
+
+  async clearFailedDocument(documentId) {
+    try {
+      deleteFailedDocument.run(documentId);
+      return true;
+    } catch (error) {
+      console.error('[ERROR] clearing failed document:', error);
+      return false;
     }
   },
 
@@ -323,7 +396,7 @@ module.exports = {
       return 0;
     }
   },
-  
+
   async getPaginatedHistory(limit, offset) {
     try {
       return getPaginatedHistoryDocuments.all(limit, offset);
@@ -351,17 +424,17 @@ module.exports = {
   async deleteDocumentsIdList(idList) {
     try {
       console.log('[DEBUG] Received idList:', idList);
-  
+
       const ids = Array.isArray(idList) ? idList : (idList?.ids || []);
-  
+
       if (!Array.isArray(ids) || ids.length === 0) {
         console.error('[ERROR] Invalid input: must provide an array of ids');
         return false;
       }
-  
+
       // Convert string IDs to integers
       const numericIds = ids.map(id => parseInt(id, 10));
-  
+
       const placeholders = numericIds.map(() => '?').join(', ');
       const query = `DELETE FROM processed_documents WHERE document_id IN (${placeholders})`;
       const query2 = `DELETE FROM history_documents WHERE document_id IN (${placeholders})`;
@@ -370,7 +443,7 @@ module.exports = {
       console.log('[DEBUG] Executing SQL query:', query2);
       console.log('[DEBUG] Executing SQL query:', query3);
       console.log('[DEBUG] With parameters:', numericIds);
-  
+
       const stmt = db.prepare(query);
       const stmt2 = db.prepare(query2);
       const stmt3 = db.prepare(query3);
@@ -395,7 +468,7 @@ module.exports = {
       // Lösche alle vorhandenen Benutzer
       const deleteResult = db.prepare('DELETE FROM users').run();
       console.log(`[DEBUG] ${deleteResult.changes} existing users deleted`);
-  
+
       // Füge den neuen Benutzer hinzu
       const result = insertUser.run(username, password);
       if (result.changes > 0) {
@@ -430,10 +503,10 @@ module.exports = {
   async getProcessingTimeStats() {
     try {
       return db.prepare(`
-        SELECT 
+        SELECT
           strftime('%H', processed_at) as hour,
           COUNT(*) as count
-        FROM processed_documents 
+        FROM processed_documents
         WHERE date(processed_at) = date('now')
         GROUP BY hour
         ORDER BY hour
@@ -443,12 +516,12 @@ module.exports = {
       return [];
     }
   },
-  
+
   async  getTokenDistribution() {
     try {
       return db.prepare(`
-        SELECT 
-          CASE 
+        SELECT
+          CASE
             WHEN totalTokens < 1000 THEN '0-1k'
             WHEN totalTokens < 2000 THEN '1k-2k'
             WHEN totalTokens < 3000 THEN '2k-3k'
@@ -466,11 +539,11 @@ module.exports = {
       return [];
     }
   },
-  
+
   async getDocumentTypeStats() {
     try {
       return db.prepare(`
-        SELECT 
+        SELECT
           substr(title, 1, instr(title || ' ', ' ') - 1) as type,
           COUNT(*) as count
         FROM processed_documents
@@ -500,21 +573,21 @@ async setProcessingStatus(documentId, title, status) {
 async getCurrentProcessingStatus() {
   try {
       const active = getActiveProcessing.get();
-      
+
       // Get last processed document with explicit UTC time
       const lastProcessed = db.prepare(`
-          SELECT 
-              document_id, 
-              title, 
-              datetime(processed_at) as processed_at 
-          FROM processed_documents 
-          ORDER BY processed_at DESC 
+          SELECT
+              document_id,
+              title,
+              datetime(processed_at) as processed_at
+          FROM processed_documents
+          ORDER BY processed_at DESC
           LIMIT 1`
       ).get();
 
       const processedToday = db.prepare(`
-          SELECT COUNT(*) as count 
-          FROM processed_documents 
+          SELECT COUNT(*) as count
+          FROM processed_documents
           WHERE date(processed_at) = date('now', 'localtime')`
       ).get();
 
