@@ -26,8 +26,10 @@ const {
   normalizeLanguage,
   isFinancialDocument,
   normalizeCustomFields,
+  dedupeCustomFields,
   sanitizeCustomFieldValue,
   getPaperlessErrorBody,
+  getPaperlessStatus,
   shouldRetryWithoutCustomFields
 } = require('../services/updateValidationService.js');
 require('dotenv').config({ path: '../data/.env' });
@@ -1627,6 +1629,7 @@ async function processDocument(doc, existingTags, existingCorrespondentList, exi
 
 function logPaperlessUpdateError(docId, title, payload, error) {
   console.error(`[ERROR] updating document ${docId} (${title || 'untitled'}):`, error.message);
+  console.error('[ERROR] Paperless API status:', getPaperlessStatus(error) || 'unknown');
   console.error('[ERROR] sanitized payload:', JSON.stringify(payload, null, 2));
   console.error('[ERROR] Paperless API response:', JSON.stringify(getPaperlessErrorBody(error), null, 2));
 }
@@ -1725,8 +1728,9 @@ async function buildUpdateData(analysis, doc, content = '') {
       }
     }
 
-    if (processedFields.length > 0) {
-      updateData.custom_fields = processedFields;
+    const dedupedFields = dedupeCustomFields(processedFields);
+    if (dedupedFields.length > 0) {
+      updateData.custom_fields = dedupedFields;
     }
   }
 
@@ -1767,9 +1771,10 @@ async function saveDocumentChanges(docId, updateData, analysis, originalData, do
     if (shouldRetryWithoutCustomFields(error, updateData)) {
       const retryPayload = { ...updateData };
       delete retryPayload.custom_fields;
-      console.warn(`[WARN] Retrying document ${docId} update without custom_fields after Paperless 400`);
+      console.warn(`[WARN] Retrying document ${docId} update without custom_fields after Paperless API status ${getPaperlessStatus(error)}`);
       try {
         updatedDocument = await paperlessService.updateDocument(docId, retryPayload);
+        console.warn(`[WARN] Document ${docId} was updated without custom_fields after Paperless rejected the nested custom field payload`);
       } catch (retryError) {
         logPaperlessUpdateError(docId, doc.title || retryPayload.title, retryPayload, retryError);
         await documentModel.setProcessingStatus(docId, doc.title || updateData.title, 'failed');

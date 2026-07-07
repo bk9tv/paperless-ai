@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Robust Paperless update validation v2
+
+- Treat Paperless API errors with `custom_fields` as recoverable for any Axios response status `>= 400`, including 400, 409, 422, and 500.
+- Retry exactly once without `custom_fields` when Paperless rejects nested custom field updates.
+- Handle Paperless duplicate custom field integrity errors such as `documents_customfieldinstance_unique_document_field` by preserving safe metadata updates and skipping custom fields.
+- Deduplicate `custom_fields` by field id before sending updates to Paperless.
+- Record a warning when custom fields are skipped after a successful fallback update.
+- Keep writing `processed_documents`, history, and metrics only after the primary or fallback Paperless update succeeds.
+- Store failed documents only after both the primary update and fallback update fail.
+
 ### Robust Paperless update validation
 
 - Harden Paperless document updates so one Paperless HTTP 400 response does not block the full processing batch.

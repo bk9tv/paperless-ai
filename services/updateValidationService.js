@@ -103,6 +103,48 @@ function normalizeCustomFields(customFields) {
   return [];
 }
 
+function getCustomFieldId(customField) {
+  const field = customField?.field ?? customField?.id;
+  if (field && typeof field === 'object') {
+    return field.id ?? field.pk ?? null;
+  }
+  if (field === undefined || field === null || field === '') return null;
+  const numericField = Number(field);
+  return Number.isInteger(numericField) ? numericField : field;
+}
+
+function hasCustomFieldValue(value) {
+  if (value === undefined || value === null) return false;
+  return String(value).trim() !== '';
+}
+
+function dedupeCustomFields(customFields) {
+  const dedupedFields = [];
+  const seenFieldIds = new Set();
+
+  for (const customField of normalizeCustomFields(customFields)) {
+    const fieldId = getCustomFieldId(customField);
+    if (fieldId === null || !hasCustomFieldValue(customField?.value)) {
+      continue;
+    }
+
+    const fieldKey = String(fieldId);
+    if (seenFieldIds.has(fieldKey)) {
+      console.warn(`[WARN] Skipping duplicate custom field id ${fieldKey}`);
+      continue;
+    }
+
+    dedupedFields.push({
+      ...customField,
+      field: fieldId,
+      value: typeof customField.value === 'string' ? customField.value.trim() : customField.value
+    });
+    seenFieldIds.add(fieldKey);
+  }
+
+  return dedupedFields;
+}
+
 function normalizeMoneyValue(value) {
   const raw = String(value || '').trim().replace(/\s+/g, '');
   if (!raw) return null;
@@ -159,8 +201,14 @@ function getPaperlessErrorBody(error) {
   return error?.response?.data || error?.message || error;
 }
 
+function getPaperlessStatus(error) {
+  const status = Number(error?.response?.status);
+  return Number.isInteger(status) ? status : null;
+}
+
 function shouldRetryWithoutCustomFields(error, payload) {
-  return error?.response?.status === 400 && !!payload?.custom_fields;
+  const status = getPaperlessStatus(error);
+  return status !== null && status >= 400 && dedupeCustomFields(payload?.custom_fields).length > 0;
 }
 
 module.exports = {
@@ -170,8 +218,10 @@ module.exports = {
   normalizeLanguage,
   isFinancialDocument,
   normalizeCustomFields,
+  dedupeCustomFields,
   normalizeMoneyValue,
   sanitizeCustomFieldValue,
   getPaperlessErrorBody,
+  getPaperlessStatus,
   shouldRetryWithoutCustomFields
 };

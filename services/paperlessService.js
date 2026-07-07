@@ -4,6 +4,7 @@ const config = require('../config/config');
 const fs = require('fs');
 const path = require('path');
 const { parse, isValid, parseISO, format } = require('date-fns');
+const { dedupeCustomFields } = require('./updateValidationService');
 
 class PaperlessService {
   constructor() {
@@ -1345,6 +1346,16 @@ async getOrCreateDocumentType(name) {
       if (updateData.title && updateData.title.length > 128) {
         updateData.title = updateData.title.substring(0, 124) + '…';
         console.warn(`[WARN] Title truncated to 128 characters for document ${documentId}`);
+      }
+
+      if (updateData.custom_fields) {
+        const dedupedCustomFields = dedupeCustomFields(updateData.custom_fields);
+        if (dedupedCustomFields.length > 0) {
+          updateData.custom_fields = dedupedCustomFields;
+        } else {
+          console.warn(`[WARN] Omitting empty or duplicate-only custom_fields for document ${documentId}`);
+          delete updateData.custom_fields;
+        }
       }
 
       console.log('[DEBUG] Final update data:', updateData);
